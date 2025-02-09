@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { getAuth, signOut } from 'firebase/auth';
 import { db } from './firebase';
-import { collection, query, where, getDocs, addDoc, deleteDoc, updateDoc, doc } from 'firebase/firestore';
+import { collection, query, where, getDocs, addDoc, deleteDoc, updateDoc, doc, onSnapshot, orderBy, serverTimestamp } from 'firebase/firestore';
 
 function App() {
   const [notes, setNotes] = useState([]);
@@ -49,6 +49,36 @@ function App() {
     loadData();
   }, [userId]);
 
+  // メモのリアルタイム同期を修正
+  useEffect(() => {
+    if (!userId) return;
+
+    const notesRef = collection(db, 'notes');
+    const q = query(
+      notesRef,
+      where('userId', '==', userId),
+      orderBy('createdAt', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const loadedNotes = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setNotes(loadedNotes);
+
+      // 最初のノートをアクティブにする（必要な場合）
+      if (!activeNoteId && loadedNotes.length > 0) {
+        setActiveNoteId(loadedNotes[0].id);
+      }
+    }, (error) => {
+      console.error('Error loading notes:', error);
+      alert('メモの読み込みに失敗しました。');
+    });
+
+    return () => unsubscribe();
+  }, [userId, activeNoteId]);
+
   const createNewFolder = async () => {
     const newFolder = {
       userId,
@@ -85,29 +115,22 @@ function App() {
     if (isCreating) return;
     setIsCreating(true);
 
-    const timestamp = new Date().toISOString();
-    const newNote = {
-      userId,
-      title: `新規メモ`,
-      content: '',
-      folderId,
-      createdAt: timestamp
-    };
-
     try {
-      // Firestoreに保存
+      const newNote = {
+        userId,
+        title: '新規メモ',
+        content: '',
+        folderId,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      };
+
       const docRef = await addDoc(collection(db, 'notes'), newNote);
-      const noteWithId = { ...newNote, id: docRef.id };
-      
-      setNotes(prev => [...prev, noteWithId]);
       setActiveNoteId(docRef.id);
-      
-      console.log('Note created successfully:', docRef.id); // デバッグ用ログ
     } catch (error) {
       console.error('Error creating note:', error);
       alert('メモの作成に失敗しました。');
     } finally {
-      // 確実に isCreating を false に設定
       setIsCreating(false);
     }
   };
@@ -154,6 +177,64 @@ function App() {
   useEffect(() => {
     console.log('isCreating changed:', isCreating);
   }, [isCreating]);
+
+  // メモの内容を保存
+  const saveNoteContent = async (noteId, content) => {
+    if (!userId) return;
+
+    try {
+      const noteRef = doc(db, `users/${userId}/notes/${noteId}`);
+      await updateDoc(noteRef, {
+        content: content,
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      console.error('Error saving note:', error);
+      alert('メモの保存に失敗しました。');
+    }
+  };
+
+  // メモエディタコンポーネント
+  const NoteEditor = ({ note }) => {
+    const [content, setContent] = useState(note?.content || '');
+    const saveTimeoutRef = useRef(null);
+
+    useEffect(() => {
+      setContent(note?.content || '');
+      return () => {
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+        }
+      };
+    }, [note]);
+
+    const handleContentChange = (newContent) => {
+      setContent(newContent);
+
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+
+      saveTimeoutRef.current = setTimeout(() => {
+        if (note?.id) {
+          saveNoteContent(note.id, newContent);
+        }
+      }, 1000);
+    };
+
+    if (!note) {
+      return <div className="flex-1 p-4">メモを選択してください</div>;
+    }
+
+    return (
+      <textarea
+        value={content}
+        onChange={(e) => handleContentChange(e.target.value)}
+        className="w-full h-full bg-vscode-bg text-vscode-text p-2 resize-none focus:outline-none"
+        placeholder="ここにメモを入力..."
+      />
+    );
+  };
 
   return (
     <div className="flex h-screen bg-vscode-bg text-vscode-text">
@@ -312,12 +393,8 @@ function App() {
           ))}
         </div>
         <div className="flex-1 p-5 bg-vscode-bg">
-          <textarea
-            value={notes.find(note => note.id === activeNoteId)?.content || ''}
-            onChange={(e) => {
-              updateNote(activeNoteId, { content: e.target.value });
-            }}
-            className="w-full h-full bg-vscode-bg text-vscode-text border-none resize-none font-mono text-sm leading-relaxed p-2.5 focus:outline-none"
+          <NoteEditor 
+            note={notes.find(note => note.id === activeNoteId)}
           />
         </div>
       </div>
